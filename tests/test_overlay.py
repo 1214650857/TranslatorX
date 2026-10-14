@@ -1,9 +1,10 @@
 import numpy as np
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QRect
 from PySide6.QtGui import QFont, QFontMetricsF
 from PySide6.QtWidgets import QApplication
 
 from translatorx.models import LayoutMode, OcrItem, WindowInfo
+from translatorx import overlay as overlay_module
 from translatorx.overlay import (
     BELOW_WIDTH_FACTOR,
     MIN_BELOW_WIDTH,
@@ -33,6 +34,36 @@ def test_below_layout_is_clamped_inside_window():
     assert rect.top() >= 0
     assert rect.right() <= 500
     assert rect.bottom() <= 400
+
+
+def test_region_expands_long_translation_without_changing_realtime_layout(monkeypatch):
+    app = _app()
+    overlay = overlay_module.TranslationOverlay()
+    item = OcrItem(((60, 10), (80, 10), (80, 22), (60, 22)), "工作", 1.0, "Graduate Achievements")
+    monkeypatch.setattr(overlay_module, "_screen_and_logical_rect", lambda _target: (None, QRect(10, 20, 200, 100)))
+    monkeypatch.setattr(overlay, "sync_target_z_order", lambda _target: None)
+    try:
+        overlay.update_content(WindowInfo(0, "test", 10, 20, 200, 100), [item], LayoutMode.BELOW, 200, 100)
+        realtime_width = overlay._items[0].rect.width()
+        overlay.update_region_content(None, QRect(10, 20, 200, 100), [item], LayoutMode.BELOW, 200, 100)
+        assert realtime_width == MIN_BELOW_WIDTH
+        assert overlay._items[0].rect.width() > realtime_width
+        assert overlay._items[0].rect.top() == 23
+    finally:
+        overlay.close()
+        app.processEvents()
+
+
+def test_region_expansion_respects_neighbouring_columns():
+    _app()
+    items = [
+        OcrItem(((left, 10), (left + 30, 10), (left + 30, 22), (left, 22)), "text", 1.0, "A long translation for a narrow column")
+        for left in [10, 180]
+    ]
+    rendered = build_render_items(items, LayoutMode.BELOW, 320, 180, 320, 180, region_mode=True)
+    assert rendered[0].rect.right() <= 110
+    assert rendered[1].rect.left() >= 110
+    assert not rendered[0].rect.intersects(rendered[1].rect)
 
 
 def test_right_layout_is_clamped_inside_window():

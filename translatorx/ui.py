@@ -1031,16 +1031,16 @@ class MainWindow(QMainWindow):
         self.region_requested.emit(image, config, ocr_config)
         self.titlebar.set_status("区域 OCR 翻译中…")
 
-    @Slot(object, int, int, object)
-    def _on_region_result(self, items, width, height, balance) -> None:
+    @Slot(object, int, int, object, str)
+    def _on_region_result(self, items, width, height, balance, coordinate_warning="") -> None:
         self._logger.info("收到区域翻译结果：items=%s image=%sx%s", len(items), width, height)
         context = self._region_context
         self._region_context = None
         self._region_busy = False
         if context is not None:
-            self._on_region_completed(*context, items, width, height, balance)
+            self._on_region_completed(*context, items, width, height, balance, coordinate_warning)
 
-    def _on_region_completed(self, screen, rect, items, width, height, balance) -> None:
+    def _on_region_completed(self, screen, rect, items, width, height, balance, coordinate_warning="") -> None:
         if balance is not None:
             self._ui_settings.setValue("TRANSLATORX_EXTERNAL_OCR_BALANCE", balance)
             self._ui_settings.sync()
@@ -1048,11 +1048,11 @@ class MainWindow(QMainWindow):
             if balance < threshold:
                 self.titlebar.set_status(f"外部 OCR 余额不足预警：{balance:g}")
         if not items:
-            self.titlebar.set_status("未识别到文字")
+            self.titlebar.set_status(coordinate_warning or "未识别到文字")
             return
         self.region_overlay.update_region_content(screen, rect, items, self._layout_mode(), width, height)
         self._logger.info("区域译文已显示")
-        self.titlebar.set_status("区域翻译完成")
+        self.titlebar.set_status(f"区域翻译完成；{coordinate_warning}" if coordinate_warning else "区域翻译完成")
 
     @Slot(str)
     def _on_region_failed(self, message: str) -> None:

@@ -119,6 +119,8 @@ def build_render_items(
     window_width: int,
     window_height: int,
     font: QFont | None = None,
+    *,
+    region_mode: bool = False,
 ) -> list[OverlayRenderItem]:
     if image_width <= 0 or image_height <= 0 or window_width <= 0 or window_height <= 0:
         return []
@@ -128,12 +130,14 @@ def build_render_items(
     scale_y = window_height / image_height
     rendered: list[OverlayRenderItem] = []
     occupied: list[QRectF] = []
+    positioned = [(item, _source_bounds(item, scale_x, scale_y)) for item in items]
+    if region_mode:
+        positioned.sort(key=lambda entry: (entry[1].top(), entry[1].left()))
 
-    for item in items:
+    for item, source in positioned:
         text = item.translation.strip()
         if not text:
             continue
-        source = _source_bounds(item, scale_x, scale_y)
         item_font = QFont(font)
         item_font.setPixelSize(max(9, min(54, base_font_size)))
         item_font.setWeight(QFont.Weight.Normal)
@@ -152,6 +156,22 @@ def build_render_items(
             # two lines look visually attached instead of widely separated.
             y = source.bottom() - 5.0
             centered = True
+            if region_mode:
+                left_limit = 4.0
+                right_limit = window_width - 4.0
+                for _other, neighbour in positioned:
+                    if neighbour.top() >= source.bottom() or neighbour.bottom() <= source.top():
+                        continue
+                    if neighbour.right() <= source.left():
+                        left_limit = max(left_limit, (neighbour.right() + source.left()) / 2.0)
+                    elif neighbour.left() >= source.right():
+                        right_limit = min(right_limit, (source.right() + neighbour.left()) / 2.0)
+                preferred_width = min(
+                    max(1.0, right_limit - left_limit),
+                    max(MIN_BELOW_WIDTH, source.width(), natural_width),
+                )
+                x = min(max(source.center().x() - preferred_width / 2.0, left_limit), right_limit - preferred_width)
+                y = source.bottom() + 1.0
         else:
             max_width = min(300.0, window_width - 8.0)
             preferred_width = min(max_width, max(60.0, natural_width))
@@ -266,6 +286,7 @@ class TranslationOverlay(QWidget):
             logical_rect.width(),
             logical_rect.height(),
             self._font,
+            region_mode=True,
         )
         self.update()
         if self._items:

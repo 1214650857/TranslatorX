@@ -220,7 +220,7 @@ def format_latency(timing: dict[str, float]) -> str:
 class ProcessingWorker(QObject):
     ready = Signal()
     completed = Signal(object, int, int)
-    region_completed = Signal(object, int, int, object)
+    region_completed = Signal(object, int, int, object, str)
     timing = Signal(object)
     failed = Signal(str)
     region_failed = Signal(str)
@@ -419,15 +419,16 @@ class ProcessingWorker(QObject):
                 ).recognize(image_bgr)
                 items = response.items
                 balance = response.balance
+                coordinate_warning = response.coordinate_warning
             else:
                 items, _timing = self._recognize(image_bgr)
                 balance = None
+                coordinate_warning = ""
 
             items = [item for item in items if should_translate_text(item.text)]
-            items = group_translation_items(items)
             self._logger.info("区域 OCR 完成：items=%s", len(items))
             if not items:
-                self.region_completed.emit([], image_bgr.shape[1], image_bgr.shape[0], balance)
+                self.region_completed.emit([], image_bgr.shape[1], image_bgr.shape[0], balance, coordinate_warning)
                 return
 
             texts: list[str] = []
@@ -439,7 +440,7 @@ class ProcessingWorker(QObject):
             translated = dict(zip(texts, translations, strict=True))
             result = [replace(item, translation=translated.get(item.text, "")) for item in items]
             self._logger.info("区域批量翻译完成：items=%s", len(result))
-            self.region_completed.emit(result, image_bgr.shape[1], image_bgr.shape[0], balance)
+            self.region_completed.emit(result, image_bgr.shape[1], image_bgr.shape[0], balance, coordinate_warning)
         except Exception as exc:
             self._logger.exception("区域 OCR 翻译失败")
             self.region_failed.emit(str(exc))
