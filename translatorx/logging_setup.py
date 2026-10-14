@@ -1,14 +1,42 @@
 from __future__ import annotations
 
+import faulthandler
 import logging
+import os
 import sys
 import threading
 import ctypes
 from ctypes import wintypes
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TextIO
 
 from .paths import log_file_path
+from .version import get_app_version
+
+
+_fault_log: TextIO | None = None
+
+
+def _enable_fault_logging(path: Path) -> Path | None:
+    global _fault_log
+    stream = None
+    try:
+        stream = path.open("a", encoding="utf-8")
+        stream.write(f"\n=== TranslatorX {datetime.now().astimezone().isoformat()} pid={os.getpid()} ===\n")
+        stream.flush()
+        faulthandler.enable(file=stream, all_threads=True)
+    except (OSError, RuntimeError):
+        if stream is not None:
+            stream.close()
+        logging.getLogger("translatorx.crash").warning("无法启用原生崩溃堆栈记录", exc_info=True)
+        return None
+    previous_stream = _fault_log
+    _fault_log = stream
+    if previous_stream is not None:
+        previous_stream.close()
+    return path
 
 
 def process_memory_mb() -> float | None:
@@ -80,6 +108,7 @@ def setup_logging() -> Path:
     root.handlers.clear()
     root.addHandler(handler)
     logging.captureWarnings(True)
+    fault_path = _enable_fault_logging(path.parent / "translatorx-crash.log")
 
     def excepthook(exc_type, exc_value, exc_traceback):
         logging.getLogger("translatorx.crash").critical(
@@ -99,6 +128,11 @@ def setup_logging() -> Path:
 
     threading.excepthook = thread_excepthook
     logging.getLogger("translatorx").info("TranslatorX 启动，日志文件：%s", path)
+    logging.getLogger("translatorx").info(
+        "运行版本：%s；Python=%s；进程=%s", get_app_version() or "source", sys.version.split()[0], os.getpid()
+    )
+    if fault_path is not None:
+        logging.getLogger("translatorx").info("原生崩溃堆栈文件：%s", fault_path)
     return path
 
 

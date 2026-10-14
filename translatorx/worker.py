@@ -406,6 +406,7 @@ class ProcessingWorker(QObject):
         from being initialized or called concurrently with realtime OCR.
         """
         try:
+            self._logger.info("开始区域 OCR：engine=%s source_shape=%s", ocr_config.get("engine", "local"), image_bgr.shape)
             if self._ocr is None and str(ocr_config.get("engine", "local")) != "external":
                 raise RuntimeError("OCR 模型尚未就绪")
 
@@ -424,6 +425,7 @@ class ProcessingWorker(QObject):
 
             items = [item for item in items if should_translate_text(item.text)]
             items = group_translation_items(items)
+            self._logger.info("区域 OCR 完成：items=%s", len(items))
             if not items:
                 self.region_completed.emit([], image_bgr.shape[1], image_bgr.shape[0], balance)
                 return
@@ -432,9 +434,11 @@ class ProcessingWorker(QObject):
             for item in items:
                 if item.text not in texts:
                     texts.append(item.text)
+            self._logger.info("开始区域批量翻译：engine=%s count=%s", translator_config.engine, len(texts))
             translations = create_translator(translator_config).translate_batch(texts)
             translated = dict(zip(texts, translations, strict=True))
             result = [replace(item, translation=translated.get(item.text, "")) for item in items]
+            self._logger.info("区域批量翻译完成：items=%s", len(result))
             self.region_completed.emit(result, image_bgr.shape[1], image_bgr.shape[0], balance)
         except Exception as exc:
             self._logger.exception("区域 OCR 翻译失败")

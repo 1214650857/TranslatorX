@@ -159,6 +159,8 @@ graph TD
 
 安装版的两个目录位于 `data/apps/<应用>` 旁边，因此既不会被更新时的文件同步清除，也不会随启动器的“删除应用”一并删除。首次运行会自动导入旧版 `TranslatorX.ini` 中的设置，旧文件保留不删。
 
+排查闪退时请提供应用日志 `translatorx.log`，而非只有 PyAppify 启动器日志。应用日志会记录运行版本和区域 OCR、翻译、显示各阶段；`translatorx-crash.log` 用于记录原生崩溃时可捕获的线程堆栈，重启后会保留已有记录。两者均位于上表中的日志目录。日志中出现“外部 OCR 坐标异常：缺少坐标”表示程序改用整个选区显示译文，不代表 OCR 请求失败。
+
 ### 配置项
 
 配置文件为 UTF-8 JSON，可手工编辑，重启后生效。
@@ -248,20 +250,22 @@ run_translatorx.py      # 程序入口
 | 技术 | 用途 |
 |---|---|
 | PyAppify | 打包安装包、管理 Python 环境与依赖、按 Git tag 更新 |
-| GitHub Actions | 打 tag 后自动测试、打包并发布 Release |
+| GitHub Actions | 手动运行测试、打包安装器并上传 Artifacts |
 
 ## 部署
 
 ### 发布流程
 
-推送 `v*` tag 会自动运行 `.github/workflows/release.yml`：在独立环境安装依赖、执行单元测试、运行真实 OpenVINO OCR 检查、使用 PyAppify 打包在线与离线安装包，并上传 GitHub Release。Actions 页面也可手动运行，此时只上传构建产物，不发布 Release。
+此 Fork 的 `.github/workflows/release.yml` 只允许手动运行，不会因推送 tag 自动打包，也不会同步到原仓库或自动发布 Release。工作流会安装依赖、执行单元测试、运行真实 OpenVINO OCR 检查、使用 PyAppify 打包安装器，并上传带版本号的 Artifacts。
+
+PyAppify 按 Git tag 加载和更新应用，因此必须先把修复提交和新版本标签都推送到自己的 Fork，再到 Actions → Build PyAppify → Run workflow，选择 `main` 或对应标签。构建会检查当前提交是否位于最新版本标签，防止安装器再次加载旧版源码。安装或更新后，请在“关于”或 `translatorx.log` 中核对实际运行版本。
 
 ```powershell
 git add .
 git commit -m "Release changes"
 git push origin main
-git tag v1.0.12
-git push origin v1.0.12
+git tag v1.0.23
+git push origin v1.0.23
 ```
 
 版本使用递增语义版本，测试版本使用 `v0.1.1-beta.1` 形式并标记为预发布。每次发布应先等待测试通过再创建 tag；PyAppify 按 Git tag 检查更新，不会等待 Release 安装包构建完成。已经发布的 tag 请勿覆盖。

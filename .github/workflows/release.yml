@@ -18,10 +18,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify checked-out application source
+        id: source
         shell: pwsh
         run: |
           $commit = git rev-parse HEAD
           Write-Host "Building commit: $commit"
+          $version = git tag --points-at HEAD --sort=-version:refname | Select-Object -First 1
+          $latestVersion = git tag --sort=-version:refname | Select-Object -First 1
+          if (-not $version -or $version -ne $latestVersion) {
+            throw 'The launcher loads the latest version tag. Push a new version tag at this commit before building.'
+          }
+          Write-Host "Application version: $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
           if (-not (Select-String -Path translatorx/ui.py -Pattern '区域单次翻译' -Quiet)) {
             throw 'translatorx/ui.py does not contain the region translation UI. Refusing to package stale source.'
           }
@@ -96,7 +104,7 @@ jobs:
           )
       - uses: actions/upload-artifact@v4
         with:
-          name: TranslatorX-windows-${{ github.ref_name }}
+          name: TranslatorX-windows-${{ steps.source.outputs.version }}
           path: pyappify_dist/*
           if-no-files-found: error
       - name: Publish release

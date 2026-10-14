@@ -4,7 +4,7 @@ import time
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QPoint, QSize, QThread, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QCloseEvent, QDesktopServices, QIcon, QMouseEvent, QPainter, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -641,11 +641,11 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.initialize)
         self.process_requested.connect(self.worker.process)
-        self.region_requested.connect(self.worker.process_region)
+        self.region_requested.connect(self.worker.process_region, Qt.ConnectionType.QueuedConnection)
         self.worker.ready.connect(self._on_worker_ready)
         self.worker.completed.connect(self._on_processed)
-        self.worker.region_completed.connect(self._on_region_result)
-        self.worker.region_failed.connect(self._on_region_failed)
+        self.worker.region_completed.connect(self._on_region_result, Qt.ConnectionType.QueuedConnection)
+        self.worker.region_failed.connect(self._on_region_failed, Qt.ConnectionType.QueuedConnection)
         self.worker.timing.connect(self._on_timing)
         self.worker.failed.connect(self._on_process_failed)
         self.worker_thread.start()
@@ -996,11 +996,17 @@ class MainWindow(QMainWindow):
         self._region_selector.begin()
 
     def _on_region_cancelled(self) -> None:
+        selector = self._region_selector
         self._region_selector = None
+        if selector is not None:
+            selector.deleteLater()
         self.titlebar.set_status("已取消区域翻译")
 
     def _on_region_selected(self, selection) -> None:
+        selector = self._region_selector
         self._region_selector = None
+        if selector is not None:
+            selector.deleteLater()
         screen = next((item for item in QGuiApplication.screens() if item.name() == selection.screen_name), None)
         if screen is None:
             self.titlebar.set_status("选区所在显示器不可用")
@@ -1021,10 +1027,13 @@ class MainWindow(QMainWindow):
         }
         self._region_busy = True
         self._region_context = (screen, selection.rect)
+        self._logger.info("提交区域翻译：engine=%s image=%sx%s", ocr_config["engine"], image.shape[1], image.shape[0])
         self.region_requested.emit(image, config, ocr_config)
         self.titlebar.set_status("区域 OCR 翻译中…")
 
+    @Slot(object, int, int, object)
     def _on_region_result(self, items, width, height, balance) -> None:
+        self._logger.info("收到区域翻译结果：items=%s image=%sx%s", len(items), width, height)
         context = self._region_context
         self._region_context = None
         self._region_busy = False
@@ -1042,9 +1051,12 @@ class MainWindow(QMainWindow):
             self.titlebar.set_status("未识别到文字")
             return
         self.region_overlay.update_region_content(screen, rect, items, self._layout_mode(), width, height)
+        self._logger.info("区域译文已显示")
         self.titlebar.set_status("区域翻译完成")
 
+    @Slot(str)
     def _on_region_failed(self, message: str) -> None:
+        self._logger.warning("区域翻译失败：%s", message)
         self._region_context = None
         self._region_busy = False
         self.titlebar.set_status(f"区域 OCR 失败：{message}")
