@@ -388,53 +388,67 @@ class PopupFollower:
         return changed
 
 
-_f8_hook_handle = None
-_f8_hook_proc = None
-_f8_on_press = None
-_f8_key_down = False
+_hotkey_hook_handle = None
+_hotkey_hook_proc = None
+_hotkey_callbacks: dict[int, object] = {}
+_hotkey_key_down: set[int] = set()
 
 
-def _f8_keyboard_proc(nCode, wParam, lParam):
-    global _f8_key_down
+def _hotkey_keyboard_proc(nCode, wParam, lParam):
     if nCode == HC_ACTION and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP):
         kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-        if kb.vkCode == VK_F8:
+        vk_code = int(kb.vkCode)
+        if vk_code in _hotkey_callbacks:
             if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                if not _f8_key_down and _f8_on_press is not None:
-                    _f8_key_down = True
+                if vk_code not in _hotkey_key_down:
+                    _hotkey_key_down.add(vk_code)
                     try:
-                        _f8_on_press()
+                        _hotkey_callbacks[vk_code]()
                     except Exception:
-                        _logger.exception("F8 钩子回调异常")
+                        _logger.exception("全局快捷键回调异常：vk=%s", vk_code)
             else:
-                _f8_key_down = False
-    return user32.CallNextHookEx(_f8_hook_handle, nCode, wParam, lParam)
+                _hotkey_key_down.discard(vk_code)
+    return user32.CallNextHookEx(_hotkey_hook_handle, nCode, wParam, lParam)
+
+
+def _install_hotkey(vk_code: int, callback) -> bool:
+    global _hotkey_hook_handle, _hotkey_hook_proc
+    _hotkey_callbacks[int(vk_code)] = callback
+    if _hotkey_hook_handle:
+        return True
+    _hotkey_hook_proc = LowLevelKeyboardProc(_hotkey_keyboard_proc)
+    _hotkey_hook_handle = user32.SetWindowsHookExW(WH_KEYBOARD_LL, _hotkey_hook_proc, None, 0)
+    if not _hotkey_hook_handle:
+        _hotkey_callbacks.pop(int(vk_code), None)
+    return bool(_hotkey_hook_handle)
+
+
+def _uninstall_hotkey(vk_code: int) -> None:
+    global _hotkey_hook_handle, _hotkey_hook_proc
+    _hotkey_callbacks.pop(int(vk_code), None)
+    _hotkey_key_down.discard(int(vk_code))
+    if _hotkey_callbacks:
+        return
+    if _hotkey_hook_handle:
+        user32.UnhookWindowsHookEx(_hotkey_hook_handle)
+    _hotkey_hook_handle = None
+    _hotkey_hook_proc = None
 
 
 def install_f8_hook(on_f8) -> bool:
-    """Install a low-level keyboard hook that calls ``on_f8`` on the F8 key."""
-    global _f8_hook_handle, _f8_hook_proc, _f8_on_press
-    if _f8_hook_handle:
-        return True
-    _f8_on_press = on_f8
-    _f8_hook_proc = LowLevelKeyboardProc(_f8_keyboard_proc)
-    _f8_hook_handle = user32.SetWindowsHookExW(
-        WH_KEYBOARD_LL, _f8_hook_proc, None, 0
-    )
-    return bool(_f8_hook_handle)
+    return _install_hotkey(VK_F8, on_f8)
 
 
 def uninstall_f8_hook() -> None:
-    """Remove the low-level keyboard hook installed by :func:`install_f8_hook`."""
-    global _f8_hook_handle, _f8_hook_proc, _f8_on_press, _f8_key_down
-    if _f8_hook_handle:
-        user32.UnhookWindowsHookEx(_f8_hook_handle)
-    _f8_hook_handle = None
-    _f8_hook_proc = None
-    _f8_on_press = None
-    _f8_key_down = False
+    _uninstall_hotkey(VK_F8)
 
 
+def install_region_hotkey(vk_code: int, callback) -> bool:
+    return _install_hotkey(vk_code, callback)
+
+
+def uninstall_region_hotkey(vk_code: int) -> None:
+    _uninstall_hotkey(vk_code)
 def exclude_window_from_capture(hwnd: int) -> bool:
     """Keep our overlay visible while excluding it from desktop capture."""
     setter = getattr(user32, "SetWindowDisplayAffinity", None)

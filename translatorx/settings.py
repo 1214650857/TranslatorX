@@ -20,7 +20,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QMessageBox,
     QPushButton,
+    QDoubleSpinBox,
+    QSpinBox,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -253,6 +256,21 @@ class CredentialDialog(QDialog):
         self.openai_base_url = self._field("TRANSLATORX_OPENAI_BASE_URL", "https://api.openai.com/v1")
         self.openai_api_key = self._secret_field("TRANSLATORX_OPENAI_API_KEY")
         self.openai_model = self._model_field("TRANSLATORX_OPENAI_MODEL", "gpt-4.1-mini")
+        self.realtime_ocr_engine = self._engine_field("TRANSLATORX_REALTIME_OCR_ENGINE")
+        self.region_ocr_engine = self._engine_field("TRANSLATORX_REGION_OCR_ENGINE")
+        self.external_ocr_endpoint = self._field("TRANSLATORX_EXTERNAL_OCR_ENDPOINT")
+        self.external_ocr_token = self._secret_field("TRANSLATORX_EXTERNAL_OCR_TOKEN")
+        self.external_ocr_timeout = QDoubleSpinBox()
+        self.external_ocr_timeout.setRange(1.0, 120.0)
+        self.external_ocr_timeout.setValue(float(self._settings.value("TRANSLATORX_EXTERNAL_OCR_TIMEOUT", 15.0)))
+        self.external_ocr_retries = QSpinBox()
+        self.external_ocr_retries.setRange(1, 3)
+        self.external_ocr_retries.setValue(int(self._settings.value("TRANSLATORX_EXTERNAL_OCR_RETRIES", 3)))
+        self.external_ocr_threshold = QDoubleSpinBox()
+        self.external_ocr_threshold.setRange(0.0, 100000.0)
+        self.external_ocr_threshold.setDecimals(4)
+        self.external_ocr_threshold.setValue(float(self._settings.value("TRANSLATORX_EXTERNAL_OCR_BALANCE_THRESHOLD", 0.02)))
+        self.region_hotkey = self._field("TRANSLATORX_REGION_HOTKEY", "F9")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 16)
@@ -330,6 +348,20 @@ class CredentialDialog(QDialog):
                 [("Base URL", self.openai_base_url), ("API Key", self.openai_api_key), ("模型", model_row)],
             )
         )
+        content_layout.addWidget(self._group(
+            "OCR 与区域单次翻译",
+            [
+                ("实时 OCR 引擎", self.realtime_ocr_engine),
+                ("区域 OCR 引擎", self.region_ocr_engine),
+                ("区域翻译快捷键", self.region_hotkey),
+                ("外部 OCR 地址", self.external_ocr_endpoint),
+                ("外部 OCR Token", self.external_ocr_token),
+                ("请求超时（秒）", self.external_ocr_timeout),
+                ("最大重试次数", self.external_ocr_retries),
+                ("余额预警阈值", self.external_ocr_threshold),
+                ("最近一次余额", self._readonly_field(str(self._settings.value("TRANSLATORX_EXTERNAL_OCR_BALANCE", "未记录")))),
+            ],
+        ))
         self.test_results = QPlainTextEdit()
         self.test_results.setObjectName("testResults")
         self.test_results.setReadOnly(True)
@@ -442,6 +474,15 @@ class CredentialDialog(QDialog):
         value = str(self._settings.value(env_name, default))
         return QLineEdit(value)
 
+    def _engine_field(self, key: str) -> QComboBox:
+        field = QComboBox()
+        field.addItem("本地 OCR", "local")
+        field.addItem("外部 OCR", "external")
+        saved = str(self._settings.value(key, "local"))
+        index = field.findData(saved)
+        field.setCurrentIndex(index if index >= 0 else 0)
+        return field
+
     def _model_field(self, env_name: str, default: str = "") -> QComboBox:
         value = str(self._settings.value(env_name, default))
         field = QComboBox()
@@ -502,6 +543,10 @@ class CredentialDialog(QDialog):
         return group
 
     def _save_and_accept(self) -> None:
+        hotkey = self.region_hotkey.text().strip().upper() or "F9"
+        if hotkey == "F8":
+            QMessageBox.warning(self, "快捷键冲突", "区域单次翻译快捷键不能与实时翻译 F8 冲突。")
+            return
         self._settings.setValue("TRANSLATORX_BAIDU_APP_ID", self.baidu_app_id.text().strip())
         self._settings.setValue("TRANSLATORX_BAIDU_SECRET_DPAPI", _protect_secret(self.baidu_secret.text().strip()))
         self._settings.setValue(
@@ -517,6 +562,14 @@ class CredentialDialog(QDialog):
         self._settings.setValue("TRANSLATORX_OPENAI_BASE_URL", self.openai_base_url.text().strip())
         self._settings.setValue("TRANSLATORX_OPENAI_API_KEY_DPAPI", _protect_secret(self.openai_api_key.text().strip()))
         self._settings.setValue("TRANSLATORX_OPENAI_MODEL", self._model_text())
+        self._settings.setValue("TRANSLATORX_REALTIME_OCR_ENGINE", self.realtime_ocr_engine.currentData() or "local")
+        self._settings.setValue("TRANSLATORX_REGION_OCR_ENGINE", self.region_ocr_engine.currentData() or "local")
+        self._settings.setValue("TRANSLATORX_REGION_HOTKEY", self.region_hotkey.text().strip().upper() or "F9")
+        self._settings.setValue("TRANSLATORX_EXTERNAL_OCR_ENDPOINT", self.external_ocr_endpoint.text().strip())
+        self._settings.setValue("TRANSLATORX_EXTERNAL_OCR_TOKEN_DPAPI", _protect_secret(self.external_ocr_token.text().strip()))
+        self._settings.setValue("TRANSLATORX_EXTERNAL_OCR_TIMEOUT", self.external_ocr_timeout.value())
+        self._settings.setValue("TRANSLATORX_EXTERNAL_OCR_RETRIES", self.external_ocr_retries.value())
+        self._settings.setValue("TRANSLATORX_EXTERNAL_OCR_BALANCE_THRESHOLD", self.external_ocr_threshold.value())
         self._settings.sync()
         self.accept()
 
@@ -609,4 +662,6 @@ class CredentialDialog(QDialog):
             "openai_base_url": self.openai_base_url.text().strip(),
             "openai_api_key": self.openai_api_key.text().strip(),
             "openai_model": self._model_text(),
+            "external_ocr_endpoint": self.external_ocr_endpoint.text().strip(),
+            "external_ocr_token": self.external_ocr_token.text().strip(),
         }

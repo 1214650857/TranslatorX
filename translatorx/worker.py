@@ -11,6 +11,7 @@ import unicodedata
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .models import OcrItem, TranslatorConfig
+from .external_ocr import ExternalOcrClient
 from .ocr import OnnxOcrService
 from .logging_setup import process_memory_mb
 from .translators import TranslationError, create_translator
@@ -239,7 +240,7 @@ class ProcessingWorker(QObject):
         if memory_mb is not None:
             self._logger.info("进程内存：working_set=%.1f MiB", memory_mb)
 
-    def _recognize(self, image_bgr):
+    def _recognize(self, image_bgr, raw_config: dict | None = None):
         """Run native OpenVINO inference outside the Qt event thread.
 
         The oknikke OpenVINO/PySide combination can raise an uncatchable
@@ -247,6 +248,14 @@ class ProcessingWorker(QObject):
         A plain Python worker thread keeps the UI and Qt event thread out of
         that native call while retaining the same single in-flight frame.
         """
+        if raw_config and str(raw_config.get("_realtime_ocr_engine", "local")) == "external":
+            response = ExternalOcrClient(
+                str(raw_config.get("_external_ocr_endpoint", "")),
+                str(raw_config.get("_external_ocr_token", "")),
+                float(raw_config.get("_external_ocr_timeout", 15.0)),
+                int(raw_config.get("_external_ocr_retries", 3)),
+            ).recognize(image_bgr)
+            return response.items, {"det_ms": 0.0, "rec_ms": 0.0, "ocr_ms": 0.0}
         recognize_timed = getattr(self._ocr, "recognize_timed", None)
         if recognize_timed is None:
             started = time.perf_counter()
@@ -308,7 +317,7 @@ class ProcessingWorker(QObject):
             }
             ocr_started = time.perf_counter()
             self._logger.info("开始 OCR：source_shape=%s", getattr(image_bgr, "shape", None))
-            items, ocr_parts = self._recognize(image_bgr)
+            items, ocr_parts = self._recognize(image_bgr, raw_config)
             ocr_ms = (time.perf_counter() - ocr_started) * 1000.0
             self._logger.info(
                 "OCR 完成：items=%s source_shape=%s analysis_shape=(%sx%s) ocr_ms=%.1f",

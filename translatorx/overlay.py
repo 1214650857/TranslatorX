@@ -174,13 +174,15 @@ def build_render_items(
 
 
 class TranslationOverlay(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, always_on_top: bool = False) -> None:
         flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowTransparentForInput
             | Qt.WindowType.WindowDoesNotAcceptFocus
         )
+        if always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
         super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -239,6 +241,38 @@ class TranslationOverlay(QWidget):
         else:
             self.hide()
 
+    def update_region_content(
+        self,
+        screen,
+        logical_rect: QRect,
+        items: list[OcrItem],
+        layout: LayoutMode,
+        image_width: int,
+        image_height: int,
+    ) -> None:
+        self._target_hwnd = 0
+        self.setGeometry(logical_rect)
+        self.winId()
+        window_handle = self.windowHandle()
+        if screen is not None and window_handle is not None:
+            if window_handle.screen() is None or window_handle.screen().name() != screen.name():
+                window_handle.setScreen(screen)
+                self.setGeometry(logical_rect)
+        self._items = build_render_items(
+            items,
+            layout,
+            image_width,
+            image_height,
+            logical_rect.width(),
+            logical_rect.height(),
+            self._font,
+        )
+        self.update()
+        if self._items:
+            self.show()
+            self.raise_()
+        else:
+            self.hide()
     def sync_target_z_order(self, target_hwnd: int) -> None:
         if self.isVisible():
             place_overlay_above_target(int(self.winId()), target_hwnd)

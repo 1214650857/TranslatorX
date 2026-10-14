@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, QThread, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QCloseEvent, QDesktopServices, QIcon, QMouseEvent, QPainter
+from PySide6.QtGui import QAction, QColor, QCloseEvent, QDesktopServices, QIcon, QMouseEvent, QPainter, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -34,17 +34,21 @@ from .updater import REPO_WEB_URL, fetch_latest_version, is_update_available
 from .version import get_app_version
 from .wgc_capture import close_wgc_capture
 from .settings import CredentialDialog
+from .region_selection import RegionSelector, grab_region, screen_at_cursor
+from .region_worker import RegionTranslationWorker
 from .theme import theme_manager, tinted_icon
 from .windows import (
     PopupFollower,
     WindowedState,
     get_window_info,
     install_f8_hook,
+    install_region_hotkey,
     is_target_foreground,
     list_windows,
     make_borderless_fullscreen,
     restore_windowed_state,
     uninstall_f8_hook,
+    uninstall_region_hotkey,
 )
 from .worker import ProcessingWorker, format_latency
 
@@ -386,8 +390,14 @@ class MainWindow(QMainWindow):
         self._borderless_state: WindowedState | None = None
         self._borderless_hwnd = 0
         self._f8_registered = False
+        self._region_hotkey_registered = False
+        self._region_hotkey_registered_vk = None
+        self._region_selector = None
+        self._region_thread = None
+        self._region_worker = None
         self._tray_hint_shown = False
         self.overlay = TranslationOverlay()
+        self.region_overlay = TranslationOverlay(always_on_top=True)
         self.credential_dialog = CredentialDialog(self, on_about=self.open_about)
 
         self._build_ui()
@@ -405,6 +415,7 @@ class MainWindow(QMainWindow):
         self.hotkey_timer = QTimer(self)
         self.hotkey_timer.setInterval(120)
         self.hotkey_timer.timeout.connect(self._sync_f8_hotkey)
+        self.hotkey_timer.timeout.connect(self._sync_region_hotkey)
         self.hotkey_timer.start()
         QTimer.singleShot(0, self.refresh_windows)
         self._shortcut_sweeps = 0
@@ -607,6 +618,16 @@ class MainWindow(QMainWindow):
         footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(24, 10, 24, 18)
         footer_layout.setSpacing(0)
+        region_row = QHBoxLayout()
+        self.region_button = QPushButton("区域单次翻译  (F9)")
+        self.region_button.setObjectName("secondaryButton")
+        self.region_button.clicked.connect(self.start_region_translation)
+        self.region_close_button = QPushButton("关闭区域译文")
+        self.region_close_button.setObjectName("secondaryButton")
+        self.region_close_button.clicked.connect(self.close_region_translation)
+        region_row.addWidget(self.region_button)
+        region_row.addWidget(self.region_close_button)
+        footer_layout.addLayout(region_row)
         self.run_button = QPushButton("正在初始化 OCR…")
         self.run_button.setObjectName("runButton")
         self.run_button.setEnabled(False)
@@ -926,10 +947,112 @@ class MainWindow(QMainWindow):
             self._f8_registered = False
             self._logger.info("F8 钩子已卸载")
 
+    def _region_hotkey_vk(self) -> int:
+        value = str(self._ui_settings.value("TRANSLATORX_REGION_HOTKEY", "F9")).strip().upper()
+        if value.startswith("F") and value[1:].isdigit():
+            number = int(value[1:])
+            if 1 <= number <= 24:
+                return 0x70 + number - 1
+        return 0x78
+
+    def _sync_region_hotkey(self) -> None:
+        vk = self._region_hotkey_vk()
+        if QApplication.activeModalWidget() is not None or vk == 0x77:
+            if self._region_hotkey_registered:
+                uninstall_region_hotkey(self._region_hotkey_registered_vk or vk)
+                self._region_hotkey_registered = False
+                self._region_hotkey_registered_vk = None
+            return
+        if self._region_hotkey_registered and self._region_hotkey_registered_vk == vk:
+            return
+        if self._region_hotkey_registered:
+            uninstall_region_hotkey(self._region_hotkey_registered_vk or vk)
+            self._region_hotkey_registered = False
+        self._region_hotkey_registered = install_region_hotkey(vk, self._on_region_hotkey)
+        if self._region_hotkey_registered:
+            self._region_hotkey_registered_vk = vk
+    def _on_region_hotkey(self) -> None:
+        if self._region_hotkey_registered:
+            QTimer.singleShot(0, self.start_region_translation)
+
     def _on_f8_hotkey(self) -> None:
         if self._f8_registered and self._f8_available():
             QTimer.singleShot(0, self._toggle_from_f8)
 
+    def start_region_translation(self) -> None:
+        if self._region_selector is not None:
+            return
+        screen = screen_at_cursor()
+        if screen is None:
+            self.titlebar.set_status("找不到当前显示器")
+            return
+        self._region_selector = RegionSelector(screen, self)
+        self._region_selector.selected.connect(self._on_region_selected)
+        self._region_selector.cancelled.connect(self._on_region_cancelled)
+        self._region_selector.begin()
+
+    def _on_region_cancelled(self) -> None:
+        self._region_selector = None
+        self.titlebar.set_status("已取消区域翻译")
+
+    def _on_region_selected(self, selection) -> None:
+        selector = self._region_selector
+        self._region_selector = None
+        screen = next((item for item in QGuiApplication.screens() if item.name() == selection.screen_name), None)
+        if screen is None:
+            self.titlebar.set_status("选区所在显示器不可用")
+            return
+        try:
+            image = grab_region(screen, selection.rect)
+        except Exception as exc:
+            self.titlebar.set_status(f"区域截图失败：{exc}")
+            return
+        self.region_overlay.clear()
+        config = self._config()
+        ocr_config = {
+            "engine": self._ui_settings.value("TRANSLATORX_REGION_OCR_ENGINE", "local"),
+            "endpoint": self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_ENDPOINT", ""),
+            "token": self.credential_dialog.credentials().get("external_ocr_token", ""),
+            "timeout_seconds": self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_TIMEOUT", 15.0, type=float),
+            "max_retries": self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_RETRIES", 3, type=int),
+        }
+        self._region_thread = QThread(self)
+        self._region_worker = RegionTranslationWorker(image, config, ocr_config)
+        self._region_worker.moveToThread(self._region_thread)
+        self._region_thread.started.connect(self._region_worker.run)
+        self._region_worker.completed.connect(lambda items, width, height, balance, screen=screen, rect=selection.rect: self._on_region_completed(screen, rect, items, width, height, balance))
+        self._region_worker.failed.connect(self._on_region_failed)
+        self._region_worker.completed.connect(self._finish_region_thread)
+        self._region_worker.failed.connect(self._finish_region_thread)
+        self._region_thread.finished.connect(self._region_worker.deleteLater)
+        self._region_thread.finished.connect(self._region_thread.deleteLater)
+        self._region_thread.start()
+        self.titlebar.set_status("区域 OCR 翻译中…")
+
+    def _finish_region_thread(self, *_args) -> None:
+        if self._region_thread is not None:
+            self._region_thread.quit()
+            self._region_thread = None
+            self._region_worker = None
+
+    def _on_region_completed(self, screen, rect, items, width, height, balance) -> None:
+        if balance is not None:
+            self._ui_settings.setValue("TRANSLATORX_EXTERNAL_OCR_BALANCE", balance)
+            self._ui_settings.sync()
+            threshold = self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_BALANCE_THRESHOLD", 0.02, type=float)
+            if balance < threshold:
+                self.titlebar.set_status(f"外部 OCR 余额不足预警：{balance:g}")
+        if not items:
+            self.titlebar.set_status("未识别到文字")
+            return
+        self.region_overlay.update_region_content(screen, rect, items, self._layout_mode(), width, height)
+        self.titlebar.set_status("区域翻译完成")
+
+    def _on_region_failed(self, message: str) -> None:
+        self.titlebar.set_status(f"区域 OCR 失败：{message}")
+
+    def close_region_translation(self) -> None:
+        self.region_overlay.clear()
     def _toggle_from_f8(self) -> None:
         if self._f8_available():
             self.toggle_running()
@@ -1078,6 +1201,12 @@ class MainWindow(QMainWindow):
         self._worker_busy = True
         self._pending_hwnd = window.hwnd
         config = self._config().to_dict()
+        credentials = self.credential_dialog.credentials()
+        config["_realtime_ocr_engine"] = self._ui_settings.value("TRANSLATORX_REALTIME_OCR_ENGINE", "local")
+        config["_external_ocr_endpoint"] = self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_ENDPOINT", "")
+        config["_external_ocr_token"] = credentials.get("external_ocr_token", "")
+        config["_external_ocr_timeout"] = self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_TIMEOUT", 15.0, type=float)
+        config["_external_ocr_retries"] = self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_RETRIES", 3, type=int)
         config["_capture_ms"] = capture_ms
         config["_capture_wgc_ms"] = capture_timings.get("capture_wgc_ms", 0.0)
         config["_capture_fallback_ms"] = capture_timings.get("capture_fallback_ms", 0.0)
@@ -1164,11 +1293,19 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.hotkey_timer.stop()
         uninstall_f8_hook()
+        if self._region_hotkey_registered:
+            uninstall_region_hotkey(self._region_hotkey_registered_vk or self._region_hotkey_vk())
         self._f8_registered = False
+        self._region_hotkey_registered = False
+        self._region_hotkey_registered_vk = None
+        self._region_selector = None
+        self._region_thread = None
+        self._region_worker = None
         self._save_main_settings()
         self._running = False
         self._restore_borderless()
         self.overlay.close()
+        self.region_overlay.close()
         self.credential_dialog.shutdown()
         self.worker_thread.quit()
         self.worker_thread.wait(3000)
