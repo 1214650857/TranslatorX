@@ -50,7 +50,7 @@ def grab_region(screen, rect: QRect) -> np.ndarray:
     pixmap = screen.grabWindow(0, rect.x() - geometry.x(), rect.y() - geometry.y(), rect.width(), rect.height())
     if pixmap.isNull():
         raise RuntimeError("无法截取选定区域")
-    frame = qimage_to_bgr(pixmap.toImage())
+    frame = qimage_to_bgr(pixmap.toImage().copy())
     if frame.size == 0:
         raise RuntimeError("选定区域截图为空")
     return frame

@@ -220,8 +220,10 @@ def format_latency(timing: dict[str, float]) -> str:
 class ProcessingWorker(QObject):
     ready = Signal()
     completed = Signal(object, int, int)
+    region_completed = Signal(object, int, int, object)
     timing = Signal(object)
     failed = Signal(str)
+    region_failed = Signal(str)
 
     def __init__(self, enable_openvino: bool = True) -> None:
         super().__init__()
@@ -395,3 +397,45 @@ class ProcessingWorker(QObject):
         except Exception as exc:
             self._logger.exception("处理帧失败")
             self.failed.emit(f"处理失败：{exc}")
+
+    @Slot(object, object, object)
+    def process_region(self, image_bgr, translator_config: TranslatorConfig, ocr_config: dict) -> None:
+        """Process a one-shot region through the already initialized OCR worker.
+
+        Keeping local OCR on this worker prevents a second native OCR runtime
+        from being initialized or called concurrently with realtime OCR.
+        """
+        try:
+            if self._ocr is None and str(ocr_config.get("engine", "local")) != "external":
+                raise RuntimeError("OCR 模型尚未就绪")
+
+            if str(ocr_config.get("engine", "local")) == "external":
+                response = ExternalOcrClient(
+                    str(ocr_config.get("endpoint", "")),
+                    str(ocr_config.get("token", "")),
+                    float(ocr_config.get("timeout_seconds", 15.0)),
+                    int(ocr_config.get("max_retries", 3)),
+                ).recognize(image_bgr)
+                items = response.items
+                balance = response.balance
+            else:
+                items, _timing = self._recognize(image_bgr)
+                balance = None
+
+            items = [item for item in items if should_translate_text(item.text)]
+            items = group_translation_items(items)
+            if not items:
+                self.region_completed.emit([], image_bgr.shape[1], image_bgr.shape[0], balance)
+                return
+
+            texts: list[str] = []
+            for item in items:
+                if item.text not in texts:
+                    texts.append(item.text)
+            translations = create_translator(translator_config).translate_batch(texts)
+            translated = dict(zip(texts, translations, strict=True))
+            result = [replace(item, translation=translated.get(item.text, "")) for item in items]
+            self.region_completed.emit(result, image_bgr.shape[1], image_bgr.shape[0], balance)
+        except Exception as exc:
+            self._logger.exception("区域 OCR 翻译失败")
+            self.region_failed.emit(str(exc))

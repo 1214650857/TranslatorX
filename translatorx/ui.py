@@ -35,7 +35,6 @@ from .version import get_app_version
 from .wgc_capture import close_wgc_capture
 from .settings import CredentialDialog
 from .region_selection import RegionSelector, grab_region, screen_at_cursor
-from .region_worker import RegionTranslationWorker
 from .theme import theme_manager, tinted_icon
 from .windows import (
     PopupFollower,
@@ -339,6 +338,7 @@ class AboutDialog(QDialog):
 
 class MainWindow(QMainWindow):
     process_requested = Signal(object, object)
+    region_requested = Signal(object, object, object)
 
     ENGINE_ITEMS = [
         ("百度翻译", "baidu"),
@@ -393,8 +393,8 @@ class MainWindow(QMainWindow):
         self._region_hotkey_registered = False
         self._region_hotkey_registered_vk = None
         self._region_selector = None
-        self._region_thread = None
-        self._region_worker = None
+        self._region_busy = False
+        self._region_context = None
         self._tray_hint_shown = False
         self.overlay = TranslationOverlay()
         self.region_overlay = TranslationOverlay(always_on_top=True)
@@ -641,8 +641,11 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.initialize)
         self.process_requested.connect(self.worker.process)
+        self.region_requested.connect(self.worker.process_region)
         self.worker.ready.connect(self._on_worker_ready)
         self.worker.completed.connect(self._on_processed)
+        self.worker.region_completed.connect(self._on_region_result)
+        self.worker.region_failed.connect(self._on_region_failed)
         self.worker.timing.connect(self._on_timing)
         self.worker.failed.connect(self._on_process_failed)
         self.worker_thread.start()
@@ -980,7 +983,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._toggle_from_f8)
 
     def start_region_translation(self) -> None:
-        if self._region_selector is not None:
+        if self._region_selector is not None or self._region_busy:
+            self.titlebar.set_status("上一轮区域翻译仍在进行")
             return
         screen = screen_at_cursor()
         if screen is None:
@@ -996,7 +1000,6 @@ class MainWindow(QMainWindow):
         self.titlebar.set_status("已取消区域翻译")
 
     def _on_region_selected(self, selection) -> None:
-        selector = self._region_selector
         self._region_selector = None
         screen = next((item for item in QGuiApplication.screens() if item.name() == selection.screen_name), None)
         if screen is None:
@@ -1016,24 +1019,17 @@ class MainWindow(QMainWindow):
             "timeout_seconds": self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_TIMEOUT", 15.0, type=float),
             "max_retries": self._ui_settings.value("TRANSLATORX_EXTERNAL_OCR_RETRIES", 3, type=int),
         }
-        self._region_thread = QThread(self)
-        self._region_worker = RegionTranslationWorker(image, config, ocr_config)
-        self._region_worker.moveToThread(self._region_thread)
-        self._region_thread.started.connect(self._region_worker.run)
-        self._region_worker.completed.connect(lambda items, width, height, balance, screen=screen, rect=selection.rect: self._on_region_completed(screen, rect, items, width, height, balance))
-        self._region_worker.failed.connect(self._on_region_failed)
-        self._region_worker.completed.connect(self._finish_region_thread)
-        self._region_worker.failed.connect(self._finish_region_thread)
-        self._region_thread.finished.connect(self._region_worker.deleteLater)
-        self._region_thread.finished.connect(self._region_thread.deleteLater)
-        self._region_thread.start()
+        self._region_busy = True
+        self._region_context = (screen, selection.rect)
+        self.region_requested.emit(image, config, ocr_config)
         self.titlebar.set_status("区域 OCR 翻译中…")
 
-    def _finish_region_thread(self, *_args) -> None:
-        if self._region_thread is not None:
-            self._region_thread.quit()
-            self._region_thread = None
-            self._region_worker = None
+    def _on_region_result(self, items, width, height, balance) -> None:
+        context = self._region_context
+        self._region_context = None
+        self._region_busy = False
+        if context is not None:
+            self._on_region_completed(*context, items, width, height, balance)
 
     def _on_region_completed(self, screen, rect, items, width, height, balance) -> None:
         if balance is not None:
@@ -1049,6 +1045,8 @@ class MainWindow(QMainWindow):
         self.titlebar.set_status("区域翻译完成")
 
     def _on_region_failed(self, message: str) -> None:
+        self._region_context = None
+        self._region_busy = False
         self.titlebar.set_status(f"区域 OCR 失败：{message}")
 
     def close_region_translation(self) -> None:
@@ -1157,10 +1155,10 @@ class MainWindow(QMainWindow):
         return True
 
     def _capture(self) -> None:
-        if not self._running or self._worker_busy:
+        if not self._running or self._worker_busy or self._region_busy:
             # A busy worker drops this tick; the wait for the next one belongs to
             # the next frame's latency, so count it for the breakdown.
-            if self._running:
+            if self._running and not self._region_busy:
                 self._skipped_ticks += 1
             return
         window = self._active_window()
@@ -1299,8 +1297,8 @@ class MainWindow(QMainWindow):
         self._region_hotkey_registered = False
         self._region_hotkey_registered_vk = None
         self._region_selector = None
-        self._region_thread = None
-        self._region_worker = None
+        self._region_context = None
+        self._region_busy = False
         self._save_main_settings()
         self._running = False
         self._restore_borderless()
